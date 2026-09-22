@@ -43,6 +43,20 @@ details{margin-top:10px}summary{cursor:pointer;font-weight:700;color:var(--blue)
 </header>
 <main>
 <div class="grid">
+<section class="card span12" id="authCard">
+  <h3>🔐 Acceso personal</h3>
+  <p class="status" style="margin-top:0">Inicia sesión para activar la lectura con IA. Tu clave de OpenAI permanece protegida en Supabase y nunca se guarda en este archivo.</p>
+  <div class="row">
+    <div><label>Correo</label><input id="loginEmail" class="field" type="email" autocomplete="username" placeholder="Tu correo"></div>
+    <div><label>Contraseña</label><input id="loginPassword" class="field" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+  </div>
+  <div class="actions" style="margin-top:12px">
+    <button class="primary" id="loginBtn">Ingresar</button>
+    <button class="secondary" id="signupBtn">Crear mi acceso</button>
+    <button class="secondary" id="logoutBtn" style="display:none">Cerrar sesión</button>
+  </div>
+  <div id="authStatus" class="note" style="margin-top:12px">No has iniciado sesión.</div>
+</section>
 <section class="card span4">
   <h3>1. Identificación</h3>
   <div class="row">
