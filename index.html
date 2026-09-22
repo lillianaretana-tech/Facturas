@@ -148,6 +148,29 @@ details{margin-top:10px}summary{cursor:pointer;font-weight:700;color:var(--blue)
 </details>
 </section>
 </div>
+
+<section class="card span12" id="historialCard">
+  <h2>🗂️ Historial / Períodos</h2>
+  <p class="muted">Guarda y consulta tus expedientes mensuales de los últimos 6 meses. Puedes empezar con las órdenes y agregar facturas conforme llegan.</p>
+  <div class="row">
+    <div><label>Proyecto</label><input id="histProyecto" class="field" placeholder="Ej. Uber"></div>
+    <div><label>Período</label><input id="histPeriodo" class="field" type="month"></div>
+    <div><label>Estado</label><select id="histEstado" class="field"><option value="">Todos</option><option value="pedido_cargado">Pedido cargado</option><option value="en_proceso">En proceso</option><option value="cerrado">Cerrado</option></select></div>
+  </div>
+  <div class="actions" style="margin-top:12px">
+    <button class="secondary" id="guardarPeriodo">Guardar / actualizar período</button>
+    <button class="secondary" id="buscarPeriodos">Buscar historial</button>
+    <button class="secondary" id="cerrarPeriodo">Cerrar período actual</button>
+  </div>
+  <div id="histStatus" class="note" style="margin-top:12px">Los datos se conservan por un máximo de 6 meses.</div>
+  <div style="overflow:auto;margin-top:12px"><table id="histTable"><thead><tr><th>Empresa</th><th>Proyecto</th><th>Período</th><th>Estado</th><th>Actualizado</th><th>Acción</th></tr></thead><tbody></tbody></table></div>
+</section>
+<section class="card span12" id="consultaRapidaCard">
+  <h2>📱 Consulta rápida</h2>
+  <p class="muted">Busca dentro del período abierto por producto, código, OC, proveedor o factura.</p>
+  <div class="row"><div style="flex:1"><label>Buscar</label><input id="quickSearch" class="field" placeholder="Producto, código, OC, proveedor o factura"></div></div>
+  <div id="quickResults" style="overflow:auto;margin-top:12px"></div>
+</section>
 </main>
 
 <script>
@@ -599,6 +622,7 @@ $('procesar').onclick=async()=>{
   state.parsedInvoices=invoiceDocs; renderInvoiceInventory();
   $('kFacturas').textContent=new Set(invoiceDocs.map(d=>d.invoice).filter(Boolean)).size;
   state.matches=reconcile(invoiceDocs); render();
+  try{await savePeriod('en_proceso')}catch(e){console.warn('No se pudo autoguardar',e)}
   $('processStatus').textContent=`Proceso terminado. Revise las filas amarillas o rojas antes de exportar.`;
  }catch(e){console.error(e);$('processStatus').textContent='Error: '+e.message}
 };
@@ -696,6 +720,46 @@ $('pendientes').onclick=()=>{
  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,professionalSheet(rows,'Pendientes',5),'Pendiente por recibir');
  XLSX.writeFile(wb,`${$('empresa').value} - ${$('proyecto').value||'Proyecto'} - PENDIENTE POR RECIBIR.xlsx`);
 };
+
+function periodPayload(){return {version:"5.0",company:$("empresa").value,project:$("proyecto").value,period:$("mes").value,sourceFileName:state.sourceFileName||"",headers:state.headers||[],rows:state.rows||[],parsedInvoices:state.parsedInvoices||[],matches:state.matches||[]};}
+function periodStatus(){return state.matches?.length&&state.parsedInvoices?.length?"en_proceso":"pedido_cargado";}
+async function savePeriod(forceStatus=null){
+ const {data:{session}}=await sb.auth.getSession(); if(!session)return alert("Inicia sesión primero.");
+ if(!state.wb||!state.rows?.length)return alert("Carga primero el Excel de órdenes.");
+ const company=$("empresa").value,project=$("proyecto").value.trim(),period=$("mes").value;
+ if(!project||!period)return alert("Indica proyecto y período.");
+ $("histStatus").textContent="Guardando período...";
+ await sb.rpc("cleanup_old_invoice_periods");
+ const record={user_id:session.user.id,company,project,period,status:forceStatus||periodStatus(),source_file_name:state.sourceFileName||null,payload:periodPayload()};
+ const {error}=await sb.from("invoice_periods").upsert(record,{onConflict:"user_id,company,project,period"});
+ if(error){$("histStatus").textContent="Error al guardar: "+error.message;return}
+ $("histStatus").textContent=`✓ ${project} ${period} guardado en Supabase.`; await searchPeriods();
+}
+async function searchPeriods(){
+ const {data:{session}}=await sb.auth.getSession(); if(!session)return alert("Inicia sesión primero.");
+ await sb.rpc("cleanup_old_invoice_periods");
+ let q=sb.from("invoice_periods").select("id,company,project,period,status,updated_at").order("updated_at",{ascending:false}).limit(100);
+ const hp=$("histProyecto").value.trim(),hm=$("histPeriodo").value,hs=$("histEstado").value;
+ if(hp)q=q.ilike("project",`%${hp}%`);if(hm)q=q.eq("period",hm);if(hs)q=q.eq("status",hs);
+ const {data,error}=await q;if(error){$("histStatus").textContent="Error: "+error.message;return}
+ const tb=$("histTable").querySelector("tbody");tb.innerHTML="";
+ for(const r of data||[]){const tr=document.createElement("tr");tr.innerHTML=`<td>${r.company}</td><td>${r.project}</td><td>${r.period}</td><td>${r.status.replaceAll("_"," ")}</td><td>${new Date(r.updated_at).toLocaleString("es-CR")}</td><td><button class="secondary" data-open="${r.id}">Abrir</button></td>`;tb.appendChild(tr)}
+ tb.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>openPeriod(b.dataset.open));$("histStatus").textContent=`${(data||[]).length} período(s) encontrado(s).`;
+}
+async function openPeriod(id){
+ const {data,error}=await sb.from("invoice_periods").select("*").eq("id",id).single();if(error)return alert(error.message);
+ const p=data.payload||{};$("empresa").value=data.company;$("proyecto").value=data.project;$("mes").value=data.period;
+ state.sourceFileName=p.sourceFileName||data.source_file_name||"";state.headers=p.headers||[];state.rows=p.rows||[];state.parsedInvoices=p.parsedInvoices||[];state.matches=p.matches||[];
+ if(state.headers.length&&state.rows.length){const aoa=[state.headers,...state.rows.map(r=>state.headers.map(k=>r[k]??""))];const ws=XLSX.utils.aoa_to_sheet(aoa);state.wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(state.wb,ws,"Órdenes");state.sheetName="Órdenes";}
+ render();renderInvoiceInventory();$("histStatus").textContent=`✓ Abierto: ${data.project} · ${data.period} · ${data.status.replaceAll("_"," ")}`;$("quickSearch").value="";renderQuick("");window.scrollTo({top:0,behavior:"smooth"});
+}
+function renderQuick(term){
+ term=norm(term);if(!term){$("quickResults").innerHTML='<div class="note">Escribe algo para buscar en el período abierto.</div>';return}
+ const found=(state.matches||[]).filter(x=>{const m=x.match||{};return norm([x.article,x.desc,x.oc,x.provider,m.invoice,m.line].join(" ")).includes(term)}).slice(0,100);
+ let s='<table><thead><tr><th>Estado</th><th>OC</th><th>Proveedor</th><th>Código</th><th>Producto</th><th>Pedido</th><th>Facturado</th><th>Factura</th><th>Motivo</th></tr></thead><tbody>';
+ for(const x of found){const m=x.match||{};s+=`<tr><td>${x.state||""}</td><td>${x.oc||""}</td><td>${x.provider||""}</td><td>${x.article||""}</td><td>${x.desc||""}</td><td>${x.qty??""}</td><td>${m.qty??""}</td><td>${m.invoice||""}</td><td>${x.validation||""}</td></tr>`}s+='</tbody></table>';$("quickResults").innerHTML=s;
+}
+$("guardarPeriodo").onclick=()=>savePeriod();$("buscarPeriodos").onclick=searchPeriods;$("cerrarPeriodo").onclick=()=>{if(confirm("¿Cerrar este período? Podrás volver a abrirlo después."))savePeriod("cerrado")};$("quickSearch").addEventListener("input",e=>renderQuick(e.target.value));
 $('limpiar').onclick=()=>location.reload();
 </script>
 </body>
