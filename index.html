@@ -196,16 +196,28 @@ function orderContext(){
  return orderRows().map(o=>({purchase_order:o.oc||null,supplier:o.provider||null,supplier_number:o.providerId||null,
  article:o.article||null,description:o.desc||null,quantity:o.qty??null,unit_price:o.price??null})).slice(0,250);
 }
-async function analyzeWithAI(file){
+async function analyzeWithAI(file,extraContext={}){
  const session=(await sb.auth.getSession()).data.session;
  if(!session) throw new Error("La función de IA está protegida. Para activarla falta configurar el acceso personal de Lilly en la V4.");
  const base64=await fileToBase64(file);
  const {data,error}=await sb.functions.invoke("invoice-ai-extract",{body:{
    filename:file.name,mime_type:file.type||"application/octet-stream",base64,
-   context:{company:$("empresa").value,project:$("proyecto").value,period:$("mes").value,orders:orderContext()}
+   context:{company:$("empresa").value,project:$("proyecto").value,period:$("mes").value,orders:orderContext(),...extraContext}
  }});
  if(error) throw error;
  return data.data;
+}
+function canonOC(v){return norm(v).replace(/^OC/,'').replace(/^0+/,'')}
+function missingOrderOCs(docs){
+ const detected=new Set(docs.filter(isInvoiceDoc).map(d=>canonOC(d.oc)).filter(Boolean));
+ return [...new Set(orderRows().map(o=>o.oc).filter(Boolean))]
+   .filter(oc=>!detected.has(canonOC(oc)));
+}
+function mergeAIDocs(base,extra){
+ const key=d=>`${norm(d.invoice)}|${canonOC(d.oc)}|${norm(d.provider)}`;
+ const seen=new Set(base.map(key));
+ for(const d of extra){const k=key(d);if(!seen.has(k)){base.push(d);seen.add(k)}}
+ return base;
 }
 function aiToDoc(ai,file){
  return {
@@ -537,7 +549,24 @@ $('procesar').onclick=async()=>{
       $('processStatus').textContent=`IA leyendo ${f.name}...`;
       try{
         const ai=await analyzeWithAI(f);
-        docs.push(...aiToDocs(ai,f));
+        let firstPass=aiToDocs(ai,f);
+        docs.push(...firstPass);
+
+        // Segunda revisión dirigida: no altera lo ya leído. Solo busca facturas
+        // correspondientes a OCs del pedido que no aparecieron en la primera pasada.
+        if((f.type||"").includes("pdf")){
+          const faltantes=missingOrderOCs(docs);
+          if(faltantes.length){
+            $('processStatus').textContent=`Verificación final de ${f.name}: buscando facturas omitidas...`;
+            const audit=await analyzeWithAI(f,{
+              audit_mode:"missing_invoices_only",
+              already_detected_invoices:docs.filter(isInvoiceDoc).map(d=>({invoice:d.invoice,purchase_order:d.oc,supplier:d.provider,pages:d.page})),
+              missing_purchase_orders:faltantes,
+              audit_instruction:"Revisa nuevamente TODO el PDF, página por página. Devuelve únicamente facturas reales que estén visibles en el PDF y que hayan sido omitidas en la primera lectura. Presta especial atención a las órdenes de compra listadas como faltantes. No inventes una factura porque exista una OC en el Excel. Si la factura no está físicamente visible, no la devuelvas."
+            });
+            mergeAIDocs(docs,aiToDocs(audit,f).filter(isInvoiceDoc));
+          }
+        }
       }catch(e){
         console.error(e);
         $('aiStatus').textContent='IA no disponible · revisar acceso/configuración';
