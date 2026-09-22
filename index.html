@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LillyTech | Conciliador de Pedidos y Facturas</title>
+<title>LillyTech | Conciliador de Pedidos y Facturas V4.6</title>
 <style>
 :root{--navy:#0b1f33;--blue:#173f67;--blue2:#235b91;--bg:#f3f6f9;--card:#fff;--line:#d8e0e8;--text:#17212b;--muted:#667788;--ok:#e9f7ef;--warn:#fff7df;--bad:#fdecec}
 *{box-sizing:border-box}body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}
@@ -38,7 +38,7 @@ details{margin-top:10px}summary{cursor:pointer;font-weight:700;color:var(--blue)
 </head>
 <body>
 <header>
-  <h1>LillyTech · Conciliador IA de Pedidos y Facturas</h1>
+  <h1>LillyTech · Conciliador IA de Pedidos y Facturas · V4.6</h1>
   <p>IPW / PW · IA para interpretar facturas reales de los sites, conciliarlas contra las órdenes y generar reportes profesionales.</p>
 </header>
 <main>
@@ -106,6 +106,15 @@ details{margin-top:10px}summary{cursor:pointer;font-weight:700;color:var(--blue)
   <div id="processStatus" class="status"></div>
 </section>
 
+<section class="card span12" id="cierres">
+  <h3>📦 Reportes de cierre</h3>
+  <p class="status" style="margin-top:0">Reportes rápidos para el cierre mensual, separados de la conciliación principal.</p>
+  <div class="actions">
+    <button class="secondary" id="consumo" disabled>Generar consumo por bodega</button>
+    <button class="secondary" id="pendientes" disabled>Generar pendiente por recibir</button>
+  </div>
+</section>
+
 <section class="card span12">
   <div class="kpis">
     <div class="kpi"><b id="kOrdenes">0</b><span>Líneas de orden</span></div>
@@ -129,7 +138,7 @@ details{margin-top:10px}summary{cursor:pointer;font-weight:700;color:var(--blue)
   <div class="tablewrap"><table id="tabla"><thead><tr>
     <th>Estado</th><th>Empresa</th><th>Proyecto</th><th>Proveedor</th><th>N° proveedor</th><th>OC</th>
     <th>Artículo / descripción OC</th><th>Cant. OC</th><th>Precio OC</th><th>Factura</th><th>Fecha</th>
-    <th>Descripción factura</th><th>Cant. fact.</th><th>Precio fact.</th><th>Monto línea</th><th>Validación</th>
+    <th>Descripción factura</th><th>Cant. fact.</th><th>Precio fact.</th><th>Impuesto %</th><th>Impuesto línea</th><th>Monto línea</th><th>Motivo / validación</th>
   </tr></thead><tbody></tbody></table></div>
 </section>
 
@@ -225,7 +234,7 @@ function aiToDoc(ai,file){
    raw:(ai.lines||[]).map(x=>`${x.code||""} ${x.description||""} ${x.quantity??""} ${x.unit_price??""} ${x.line_total??""}`).join("\n"),
    invoice:ai.invoice_number||"",oc:ai.purchase_order||"",date:ai.invoice_date||"",
    provider:ai.supplier_name||"",total:ai.total||0,type:ai.document_type||"unknown",
-   supplierLines:(ai.lines||[]).map(x=>({code:x.code,desc:x.description,qty:x.quantity,price:x.unit_price,amount:x.line_total})),
+   supplierLines:(ai.lines||[]).map(x=>({code:x.code,desc:x.description,qty:x.quantity,price:x.unit_price,amount:x.line_total,taxRate:x.tax_rate,taxAmount:x.tax_amount})),
    aiWarnings:ai.warnings||[],subtotal:ai.subtotal,tax:ai.tax,currency:ai.currency
  };
 }
@@ -441,6 +450,7 @@ function orderRows(){
    article:get(r,['Artículo','Articulo']),
    qty:get(r,['Cantidad Ordenada','Cantidad solicitada','Cantidad']),
    price:get(r,['Precio Unitario','Precio unitario']),
+   warehouse:get(r,['Bodega','Almacén','Almacen']),
    status:get(r,['Estado'])
  })).filter(x=>norm(x.status)!=='CANCELADA');
 }
@@ -498,11 +508,11 @@ function reconcile(docs){
      if(!credible)continue;
      usedO.add(p.o._i);usedL.add(p.l._li);
      let st='Conciliado',notes=[];
-     if(!providerSimilar(p.o.provider,inv.provider)){st='Revisar';notes.push('Proveedor requiere revisión')}
-     if(p.l.qty!=null && money(p.o.qty)>0 && !p.qok){st='Revisar';notes.push('Cantidad diferente')}
-     if(p.l.price!=null && money(p.o.price)>0 && !p.pok){st='Revisar';notes.push('Precio diferente')}
-     if(p.ds<.18 && !p.codeok){st='Revisar';notes.push('Descripción requiere revisión')}
-     resultByIndex.set(p.o._i,{...p.o,match:{...inv,line:p.l.desc||'',lineScore:p.ds,qty:p.l.qty,price:p.l.price,amount:p.l.amount},state:st,validation:notes.join('; ')||'OC, proveedor, producto y valores consistentes.'});
+     if(!providerSimilar(p.o.provider,inv.provider)){st='Revisar';notes.push(`⚠ Proveedor requiere revisión: OC ${p.o.provider||''} / Factura ${inv.provider||''}`)}
+     if(p.l.qty!=null && money(p.o.qty)>0 && !p.qok){st='Revisar';notes.push(`⚠ Diferencia de cantidad: OC ${p.o.qty} / Factura ${p.l.qty}`)}
+     if(p.l.price!=null && money(p.o.price)>0 && !p.pok){st='Revisar';notes.push(`⚠ Diferencia de precio: OC ${p.o.price} / Factura ${p.l.price}`)}
+     if(p.ds<.18 && !p.codeok){st='Revisar';notes.push('⚠ Descripción del producto requiere revisión')}
+     resultByIndex.set(p.o._i,{...p.o,match:{...inv,line:p.l.desc||'',lineScore:p.ds,qty:p.l.qty,price:p.l.price,amount:p.l.amount,taxRate:p.l.taxRate,taxAmount:p.l.taxAmount},state:st,validation:notes.join('; ')||'OC, proveedor, producto y valores consistentes.'});
    }
    for(const o of group){
      if(resultByIndex.has(o._i))continue;
@@ -530,11 +540,11 @@ function render(){
    if(x.state==='Conciliado')ok++; else if(x.state==='Revisar')rev++; else sin++;
    const m=x.match||{};
    let tr=document.createElement('tr'); tr.className=x.state==='Conciliado'?'ok':x.state==='Revisar'?'warn':'bad';
-   const vals=[`<span class="pill ${tr.className}">${x.state}</span>`,$('empresa').value,$('proyecto').value,x.provider||'',x.providerId||'',x.oc||'',x.desc||x.article||'',x.qty??'',x.price??'',m.invoice||'',m.date||'',m.line||'',m.qty??'',m.price??'',m.amount??'',x.validation||''];
+   const vals=[`<span class="pill ${tr.className}">${x.state}</span>`,$('empresa').value,$('proyecto').value,x.provider||'',x.providerId||'',x.oc||'',x.desc||x.article||'',x.qty??'',x.price??'',m.invoice||'',m.date||'',m.line||'',m.qty??'',m.price??'',m.taxRate??'',m.taxAmount??'',m.amount??'',x.validation||''];
    vals.forEach(v=>{let td=document.createElement('td');td.innerHTML=v;tr.appendChild(td)});tb.appendChild(tr);
  }
  $('kOk').textContent=ok;$('kRev').textContent=rev;$('kSin').textContent=sin;
- $('exportar').disabled=!state.matches.length;$('exactus').disabled=!state.matches.length;$('control').disabled=!state.matches.length;
+ $('exportar').disabled=!state.matches.length;$('exactus').disabled=!state.matches.length;$('control').disabled=!state.matches.length;$('consumo').disabled=!state.matches.length;$('pendientes').disabled=!state.matches.length;
 }
 
 $('procesar').onclick=async()=>{
@@ -596,12 +606,12 @@ $('procesar').onclick=async()=>{
 function appendInvoiceColumns(){
  const src=state.wb.Sheets[state.sheetName];
  const aoa=XLSX.utils.sheet_to_json(src,{header:1,defval:null,raw:true});
- const newHeaders=['Empresa','Proyecto','Número factura','Fecha factura','Descripción en factura','Cantidad facturada','Precio unitario factura','Monto línea factura','Estado conciliación','Validación'];
+ const newHeaders=['Empresa','Proyecto','Número factura','Fecha factura','Descripción en factura','Cantidad facturada','Precio unitario factura','Impuesto %','Impuesto línea','Monto línea factura','Estado conciliación','Motivo / validación'];
  aoa[0]=[...aoa[0],...newHeaders];
  const active=orderRows();
  for(const x of state.matches){
    const r=x._i+1, m=x.match||{};
-   aoa[r]=[...(aoa[r]||[]),$('empresa').value,$('proyecto').value,m.invoice||'',m.date||'',m.line||'',m.qty??'',m.price??'',m.amount??'',x.state,x.validation];
+   aoa[r]=[...(aoa[r]||[]),$('empresa').value,$('proyecto').value,m.invoice||'',m.date||'',m.line||'',m.qty??'',m.price??'',m.taxRate??'',m.taxAmount??'',m.amount??'',x.state,x.validation];
  }
  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),state.sheetName.substring(0,31));
  const summary=[['Empresa','Proyecto','Proveedor','Número proveedor','Orden compra','Número factura','Fecha factura','Total factura','Archivo origen']];
@@ -626,16 +636,22 @@ function professionalSheet(aoa,title,headerRow){
 $('exportar').onclick=()=>{
  const rows=titleRows("CONCILIACIÓN DE PEDIDOS Y FACTURAS");
  rows.push([]);
- rows.push(['Estado','Empresa','Proyecto','Proveedor','Número proveedor','Orden compra','Artículo','Descripción OC','Cantidad OC','Precio OC','Número factura','Fecha factura','Descripción factura','Cantidad facturada','Precio unitario factura','Monto línea','Validación']);
- for(const x of state.matches){let m=x.match||{};rows.push([x.state,$('empresa').value,$('proyecto').value,x.provider||'',x.providerId||'',x.oc||'',x.article||'',x.desc||'',x.qty??'',x.price??'',m.invoice||'',m.date||'',m.line||'',m.qty??'',m.price??'',m.amount??'',x.validation])}
+ rows.push(['Estado','Empresa','Proyecto','Proveedor','Número proveedor','Orden compra','Artículo','Descripción OC','Cantidad OC','Precio OC','Número factura','Fecha factura','Descripción factura','Cantidad facturada','Precio unitario factura','Impuesto %','Impuesto línea','Monto línea','Motivo / validación']);
+ for(const x of state.matches){let m=x.match||{};rows.push([x.state,$('empresa').value,$('proyecto').value,x.provider||'',x.providerId||'',x.oc||'',x.article||'',x.desc||'',x.qty??'',x.price??'',m.invoice||'',m.date||'',m.line||'',m.qty??'',m.price??'',m.taxRate??'',m.taxAmount??'',m.amount??'',x.validation])}
  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,professionalSheet(rows,"Conciliación",5),'Conciliación');
  const base=(state.sourceFileName||'pedido').replace(/\.(xlsx|xls)$/i,'');
  XLSX.writeFile(wb,`${base} - CONCILIADO.xlsx`);
 };
 $('exactus').onclick=()=>{
  const rows=titleRows("REPORTE PARA TRÁMITE EN EXACTUS"); rows.push([]);
- rows.push(['Empresa','Proyecto','Proveedor','Número proveedor','Orden compra','Número factura','Fecha factura','Artículo','Descripción','Cantidad','Precio unitario','Monto línea','Estado']);
- for(const x of state.matches){let m=x.match||{};rows.push([$('empresa').value,$('proyecto').value,x.provider||'',x.providerId||'',x.oc||'',m.invoice||'',m.date||'',x.article||'',m.line||x.desc||'',m.qty??x.qty??'',m.price??'',m.amount??'',x.state])}
+ rows.push(['Empresa','Proyecto','Bodega','Proveedor','Número proveedor','Orden compra','Número factura','Fecha factura','Artículo','Descripción','Cantidad OC','Cantidad factura','Precio OC','Precio factura','Impuesto %','Impuesto línea','Monto línea','Total factura','Estado','Motivo de revisión']);
+ const totalShown=new Set();
+ for(const x of state.matches){
+   let m=x.match||{}, invKey=m.invoice||'';
+   let totalOnce='';
+   if(invKey && !totalShown.has(invKey)){totalOnce=m.total??'';totalShown.add(invKey)}
+   rows.push([$('empresa').value,$('proyecto').value,x.warehouse||'',x.provider||'',x.providerId||'',x.oc||'',m.invoice||'',m.date||'',x.article||'',m.line||x.desc||'',x.qty??'',m.qty??'',x.price??'',m.price??'',m.taxRate??'',m.taxAmount??'',m.amount??'',totalOnce,x.state,x.validation||'']);
+ }
  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,professionalSheet(rows,"Exactus",5),'Trámite Exactus');
  XLSX.writeFile(wb,`${$('empresa').value} - ${$('proyecto').value||'Proyecto'} - EXACTUS.xlsx`);
 };
@@ -650,6 +666,35 @@ $('control').onclick=()=>{
  }
  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,professionalSheet(rows,"Control",5),'Control facturas');
  XLSX.writeFile(wb,`${$('empresa').value} - ${$('proyecto').value||'Proyecto'} - CONTROL FACTURAS.xlsx`);
+};
+function safeSheetName(s){return (String(s||'Sin bodega').replace(/[\\\/\?\*\[\]:]/g,' ').trim()||'Sin bodega').substring(0,31)}
+function uniqueSheetName(base,used){let n=safeSheetName(base),out=n,i=2;while(used.has(out)){out=safeSheetName(n.substring(0,27)+' '+i++);}used.add(out);return out}
+$('consumo').onclick=()=>{
+ const eligible=state.matches.filter(x=>x.match && x.match.invoice && x.match.line && x.match.qty!=null);
+ if(!eligible.length)return alert('No hay líneas facturadas para generar consumo.');
+ const groups=new Map();
+ for(const x of eligible){const k=x.warehouse||'Sin bodega';if(!groups.has(k))groups.set(k,[]);groups.get(k).push(x)}
+ const wb=XLSX.utils.book_new(),used=new Set();
+ for(const [warehouse,items] of groups){
+   const rows=titleRows(`CONSUMO DE BODEGA · ${warehouse}`);rows.push([]);
+   rows.push(['Bodega','Código','Descripción','Cantidad consumida','Precio unitario','Monto consumo','Factura','Estado / observación']);
+   let total=0;
+   for(const x of items){const m=x.match||{};const amount=(m.amount!=null&&m.amount!=='')?money(m.amount):((m.qty!=null&&m.price!=null)?money(m.qty)*money(m.price):'');if(amount!=='')total+=money(amount);rows.push([warehouse,x.article||m.code||'',m.line||x.desc||'',m.qty??'',m.price??'',amount,m.invoice||'',x.state==='Revisar'?x.validation||'Revisar':'']);}
+   rows.push([]);rows.push(['TOTAL CONSUMO','','','','',total]);
+   XLSX.utils.book_append_sheet(wb,professionalSheet(rows,'Consumo',5),uniqueSheetName(warehouse,used));
+ }
+ XLSX.writeFile(wb,`${$('empresa').value} - ${$('proyecto').value||'Proyecto'} - CONSUMO POR BODEGA.xlsx`);
+};
+$('pendientes').onclick=()=>{
+ const pending=state.matches.filter(x=>x.state==='Sin correspondencia');
+ if(!pending.length)return alert('No hay artículos pendientes por recibir en esta conciliación.');
+ const rows=titleRows('PENDIENTE POR RECIBIR / FACTURAR');rows.push([]);
+ rows.push(['Empresa','Proyecto','Bodega','Proveedor','Número proveedor','Orden compra','Artículo','Descripción','Cantidad pedida','Precio unitario OC','Monto pendiente','Motivo']);
+ let total=0;
+ for(const x of pending){const amount=(x.qty!=null&&x.price!=null)?money(x.qty)*money(x.price):'';if(amount!=='')total+=money(amount);rows.push([$('empresa').value,$('proyecto').value,x.warehouse||'',x.provider||'',x.providerId||'',x.oc||'',x.article||'',x.desc||'',x.qty??'',x.price??'',amount,x.validation||'No se encontró factura']);}
+ rows.push([]);rows.push(['TOTAL PENDIENTE','','','','','','','','','',total]);
+ const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,professionalSheet(rows,'Pendientes',5),'Pendiente por recibir');
+ XLSX.writeFile(wb,`${$('empresa').value} - ${$('proyecto').value||'Proyecto'} - PENDIENTE POR RECIBIR.xlsx`);
 };
 $('limpiar').onclick=()=>location.reload();
 </script>
