@@ -209,12 +209,17 @@ async function analyzeWithAI(file){
 }
 function aiToDoc(ai,file){
  return {
-   file:file.name,page:"IA",raw:(ai.lines||[]).map(x=>`${x.code||""} ${x.description||""} ${x.quantity??""} ${x.unit_price??""} ${x.line_total??""}`).join("\n"),
+   file:file.name,page:(ai.pages&&ai.pages.length?ai.pages.join(", "):"IA"),
+   raw:(ai.lines||[]).map(x=>`${x.code||""} ${x.description||""} ${x.quantity??""} ${x.unit_price??""} ${x.line_total??""}`).join("\n"),
    invoice:ai.invoice_number||"",oc:ai.purchase_order||"",date:ai.invoice_date||"",
    provider:ai.supplier_name||"",total:ai.total||0,type:ai.document_type||"unknown",
    supplierLines:(ai.lines||[]).map(x=>({code:x.code,desc:x.description,qty:x.quantity,price:x.unit_price,amount:x.line_total})),
    aiWarnings:ai.warnings||[],subtotal:ai.subtotal,tax:ai.tax,currency:ai.currency
  };
+}
+function aiToDocs(result,file){
+ const items=Array.isArray(result?.documents)?result.documents:[result];
+ return items.filter(Boolean).map(x=>aiToDoc(x,file));
 }
 
 
@@ -517,7 +522,7 @@ $('procesar').onclick=async()=>{
       $('processStatus').textContent=`IA leyendo ${f.name}...`;
       try{
         const ai=await analyzeWithAI(f);
-        docs.push(aiToDoc(ai,f));
+        docs.push(...aiToDocs(ai,f));
       }catch(e){
         console.error(e);
         $('aiStatus').textContent='IA no disponible · revisar acceso/configuración';
