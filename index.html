@@ -433,58 +433,73 @@ function orderRows(){
  })).filter(x=>norm(x.status)!=='CANCELADA');
 }
 
-function extractLineCandidates(doc, orders){
- const text=doc.raw.replace(/\r/g,'\n');
- const rawLines=text.split(/\n+/).map(x=>x.trim()).filter(Boolean);
- let candidates=[];
- for(const o of orders){
-   // First use supplier-specific structured rows when available.
-   let structured=(doc.supplierLines||[]).map(x=>({
-     x, score:Math.max(sim(o.desc,x.desc),sim(o.article,x.code),sim(o.article,x.desc))
-   })).sort((a,b)=>b.score-a.score)[0];
-   if(structured && structured.score>=.28){
-     candidates.push({o,best:structured.x.desc,score:structured.score,qty:structured.x.qty,price:structured.x.price,amount:structured.x.amount});
-     continue;
-   }
-   // Generic OCR fallback: search both physical OCR lines and wider text windows.
-   let chunks=[...rawLines];
-   const words=text.replace(/\s+/g,' ').split(' ');
-   for(let i=0;i<words.length;i+=8) chunks.push(words.slice(i,i+24).join(' '));
-   let best='',score=0;
-   for(const l of chunks){let s=Math.max(sim(o.desc,l),sim(o.article,l));if(s>score){score=s;best=l}}
-   let nums=(best.match(/[\d.,]+/g)||[]).map(money).filter(n=>n>0);
-   let qty=null,price=null,amount=null;
-   if(nums.length>=2){ amount=nums[nums.length-1]; price=nums[nums.length-2]; qty=nums.length>=3?nums[nums.length-3]:null; }
-   candidates.push({o,best,score,qty,price,amount});
- }
- return candidates;
+function isInvoiceDoc(d){
+ const t=norm(d.type);
+ return t==='INVOICE' || (!!d.invoice && t!=='PURCHASE ORDER' && t!=='SUPPORT');
+}
+function sameOC(a,b){
+ const clean=x=>norm(x).replace(/^OC\s*/,'').replace(/^0+/,'');
+ return !!a && !!b && clean(a)===clean(b);
+}
+function providerSimilar(a,b){
+ const A=norm(a),B=norm(b); if(!A||!B)return false;
+ return A.includes(B)||B.includes(A)||sim(A,B)>=.45;
+}
+function closeNum(a,b,tol=.015){
+ a=money(a);b=money(b); if(!a||!b)return false;
+ return Math.abs(a-b)/Math.max(1,Math.abs(b))<=tol;
+}
+function lineEvidence(o,l){
+ const ds=Math.max(sim(o.desc,l.desc),sim(o.article,l.code),sim(o.article,l.desc));
+ const qok=l.qty!=null && money(o.qty)>0 && closeNum(l.qty,o.qty,.001);
+ const pok=l.price!=null && money(o.price)>0 && closeNum(l.price,o.price,.02);
+ const codeok=!!o.article && !!l.code && norm(o.article)===norm(l.code);
+ let score=ds*5+(qok?2.5:0)+(pok?3.5:0)+(codeok?5:0);
+ return {score,ds,qok,pok,codeok};
 }
 function reconcile(docs){
  const orders=orderRows(), results=[];
- for(const o of orders){
-   let docScores=docs.map(d=>{
-     let s=0;
-     if(o.oc && d.oc && norm(o.oc).replace('OC ','').endsWith(norm(d.oc).replace('OC ','')))s+=5;
-     if(o.provider && d.provider && (norm(o.provider).includes(norm(d.provider))||norm(d.provider).includes(norm(o.provider))))s+=3;
-     s+=sim(o.desc,d.raw)*2;
-     return {d,s};
-   }).sort((a,b)=>b.s-a.s);
-   const bestDoc=docScores[0];
-   if(!bestDoc||bestDoc.s<1.1){
-     results.push({...o,match:null,state:'Sin correspondencia',validation:'No se encontró factura con suficiente evidencia.'}); continue;
+ const invoices=docs.filter(isInvoiceDoc);
+ const byOC=new Map();
+ for(const o of orders){const k=norm(o.oc).replace(/^OC\s*/,'');if(!byOC.has(k))byOC.set(k,[]);byOC.get(k).push(o)}
+ const resultByIndex=new Map();
+
+ for(const [ocKey,group] of byOC){
+   // Invoice metadata must come from an invoice, never from a PO/support page.
+   let invs=invoices.filter(d=>sameOC(group[0].oc,d.oc));
+   if(!invs.length){
+     for(const o of group) resultByIndex.set(o._i,{...o,match:null,state:'Sin correspondencia',validation:'No se encontró factura para esta OC en los documentos cargados.'});
+     continue;
    }
-   const lc=extractLineCandidates(bestDoc.d,[o])[0];
-   let st=lc.score>=.42?'Conciliado':'Revisar', notes=[];
-   if(bestDoc.d.oc && o.oc && !norm(o.oc).endsWith(norm(bestDoc.d.oc).replace('OC ',''))) {st='Revisar';notes.push('OC distinta')}
-   if(lc.score<.42)notes.push('Descripción requiere revisión');
-   // OCR amounts are suggestions; if price is not credible, retain blank.
-   let fp=lc.price, fq=lc.qty, fa=lc.amount;
-   if(fp && o.price && Math.abs(fp-money(o.price))/Math.max(1,money(o.price))>.6){fp=null;fa=null;notes.push('Precio OCR no confiable')}
-   results.push({...o,match:{...bestDoc.d,line:lc.best,lineScore:lc.score,qty:fq,price:fp,amount:fa},state:st,validation:notes.join('; ')||'Coincidencia por OC/proveedor/descripción.'});
+   // Prefer supplier-consistent invoice when more than one invoice references an OC.
+   invs.sort((a,b)=>Number(providerSimilar(group[0].provider,b.provider))-Number(providerSimilar(group[0].provider,a.provider)));
+   const inv=invs[0];
+   const lines=(inv.supplierLines||[]).map((l,i)=>({...l,_li:i}));
+   const pairs=[];
+   for(const o of group) for(const l of lines){const e=lineEvidence(o,l);pairs.push({o,l,...e})}
+   pairs.sort((a,b)=>b.score-a.score);
+   const usedO=new Set(),usedL=new Set();
+   for(const p of pairs){
+     if(usedO.has(p.o._i)||usedL.has(p.l._li))continue;
+     // Do not force a line merely because the OC matches. Require descriptive or numeric evidence.
+     const credible=p.codeok || (p.qok&&p.pok&&p.ds>=.10) || (p.ds>=.34&&(p.qok||p.pok)) || p.ds>=.58;
+     if(!credible)continue;
+     usedO.add(p.o._i);usedL.add(p.l._li);
+     let st='Conciliado',notes=[];
+     if(!providerSimilar(p.o.provider,inv.provider)){st='Revisar';notes.push('Proveedor requiere revisión')}
+     if(p.l.qty!=null && money(p.o.qty)>0 && !p.qok){st='Revisar';notes.push('Cantidad diferente')}
+     if(p.l.price!=null && money(p.o.price)>0 && !p.pok){st='Revisar';notes.push('Precio diferente')}
+     if(p.ds<.18 && !p.codeok){st='Revisar';notes.push('Descripción requiere revisión')}
+     resultByIndex.set(p.o._i,{...p.o,match:{...inv,line:p.l.desc||'',lineScore:p.ds,qty:p.l.qty,price:p.l.price,amount:p.l.amount},state:st,validation:notes.join('; ')||'OC, proveedor, producto y valores consistentes.'});
+   }
+   for(const o of group){
+     if(resultByIndex.has(o._i))continue;
+     resultByIndex.set(o._i,{...o,match:{...inv,line:'',qty:null,price:null,amount:null},state:'Revisar',validation:'La OC tiene factura, pero no se identificó una línea única y confiable para este artículo.'});
+   }
  }
+ for(const o of orders)results.push(resultByIndex.get(o._i)||{...o,match:null,state:'Sin correspondencia',validation:'Sin evidencia suficiente.'});
  return results;
 }
-
 function renderInvoiceInventory(){
  const tb=$('invoiceTable').querySelector('tbody'); tb.innerHTML='';
  for(const d of state.parsedInvoices){
@@ -541,9 +556,10 @@ $('procesar').onclick=async()=>{
       docs.push(...buildInvoiceDocs(parsed));
     }
   }
-  state.parsedInvoices=docs; renderInvoiceInventory();
-  $('kFacturas').textContent=new Set(docs.map(d=>d.invoice||`${d.file}-p${d.page}`)).size;
-  state.matches=reconcile(docs); render();
+  const invoiceDocs=docs.filter(isInvoiceDoc);
+  state.parsedInvoices=invoiceDocs; renderInvoiceInventory();
+  $('kFacturas').textContent=new Set(invoiceDocs.map(d=>d.invoice).filter(Boolean)).size;
+  state.matches=reconcile(invoiceDocs); render();
   $('processStatus').textContent=`Proceso terminado. Revise las filas amarillas o rojas antes de exportar.`;
  }catch(e){console.error(e);$('processStatus').textContent='Error: '+e.message}
 };
@@ -600,7 +616,7 @@ $('control').onclick=()=>{
  const seen=new Set();
  for(const d of state.parsedInvoices){let k=d.file+'|'+d.invoice;if(seen.has(k))continue;seen.add(k);
    let related=state.matches.filter(x=>x.match && x.match.invoice===d.invoice);
-   let st=related.some(x=>x.state==='Sin correspondencia')?'Sin correspondencia':related.some(x=>x.state==='Revisar')?'Revisar':'Conciliado';
+   let st=!related.length?'Revisar':related.some(x=>x.state==='Revisar')?'Revisar':related.every(x=>x.state==='Conciliado')?'Conciliado':'Revisar';
    rows.push([d.provider||'',d.oc||'',d.invoice||'',d.date||'',d.currency||'',d.subtotal??'',d.tax??'',d.total??'',(d.supplierLines||[]).length,[st,...(d.aiWarnings||[])].join(' · ')]);
  }
  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,professionalSheet(rows,"Control",5),'Control facturas');
