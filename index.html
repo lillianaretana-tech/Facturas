@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LillyTech | Conciliador de Pedidos y Facturas V4.6</title>
+<title>LillyTech | Conciliador de Pedidos y Facturas V5.4</title>
 <style>
 :root{--navy:#0b1f33;--blue:#173f67;--blue2:#235b91;--bg:#f3f6f9;--card:#fff;--line:#d8e0e8;--text:#17212b;--muted:#667788;--ok:#e9f7ef;--warn:#fff7df;--bad:#fdecec}
 *{box-sizing:border-box}body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}
@@ -589,8 +589,25 @@ function render(){
 $('procesar').onclick=async()=>{
  try{
   if(!state.wb)return alert('Primero seleccione el Excel de órdenes.');
-  if(!state.invoiceDocs.length)return alert('Seleccione al menos una factura.');
   let warning=projectRule(); if(warning&&!confirm(warning+'\n¿Desea continuar?'))return;
+
+  // Modo consumo: permite trabajar únicamente con el Excel cuando no hay facturas.
+  // Las líneas Recibida/Recibido se usan como fuente de recepción para Consumo por bodega.
+  if(!state.invoiceDocs.length){
+    state.parsedInvoices=[];
+    state.matches=(state.rows||[]).map((o,i)=>({
+      ...o,_i:i,match:null,
+      state:['RECIBIDA','RECIBIDO'].includes(norm(o.status))?'Recibida':'Sin correspondencia',
+      validation:['RECIBIDA','RECIBIDO'].includes(norm(o.status))
+        ?'Recibida según control del Excel · disponible para consumo.'
+        :'Sin factura cargada y sin estado Recibida.'
+    }));
+    render();
+    $('processStatus').textContent='Excel procesado sin facturas. Las líneas con Estado Recibida están disponibles para generar Consumo por bodega.';
+    $('aiStatus').textContent='Modo consumo desde Excel';
+    try{ await savePeriod('en_proceso'); }catch(e){}
+    return;
+  }
   let docs=[];
   if($('motor').value==='ai'){
     $('aiStatus').textContent='Analizando con IA...';
