@@ -488,7 +488,7 @@ function criticalDocIssue(d){
  if(!isInvoiceDoc(d))return "";
  const warned=(d.aiWarnings||[]).some(w=>norm(w).includes("DOCUMENTO ILEGIBLE"));
  if(d.criticalVerified===false || d.criticalReadability==="uncertain" || d.criticalReadability==="illegible" || warned)
-   return "⚠ DOCUMENTO ILEGIBLE – SOLICITAR FACTURA NUEVAMENTE";
+   return "⚠ CAMPO ILEGIBLE – REVISAR";
  return "";
 }
 function sameOC(a,b){
@@ -504,13 +504,15 @@ function closeNum(a,b,tol=.015){
  return Math.abs(a-b)/Math.max(1,Math.abs(b))<=tol;
 }
 function lineEvidence(o,l){
- if(l.verified===false || l.readability==="uncertain" || l.readability==="illegible") return {score:-999,ds:0,qok:false,pok:false,codeok:false};
+ // Evaluate the readable fields independently. An uncertain description must not erase
+ // a clearly readable quantity, price, code, tax, etc.
  const ds=Math.max(sim(o.desc,l.desc),sim(o.article,l.code),sim(o.article,l.desc));
+ const fieldWarning=(l.verified===false || l.readability==="uncertain" || l.readability==="illegible");
  const qok=l.qty!=null && money(o.qty)>0 && closeNum(l.qty,o.qty,.001);
  const pok=l.price!=null && money(o.price)>0 && closeNum(l.price,o.price,.02);
  const codeok=!!o.article && !!l.code && norm(o.article)===norm(l.code);
  let score=ds*5+(qok?2.5:0)+(pok?3.5:0)+(codeok?5:0);
- return {score,ds,qok,pok,codeok};
+ return {score,ds,qok,pok,codeok,fieldWarning};
 }
 function reconcile(docs){
  const orders=orderRows(), results=[];
@@ -551,7 +553,7 @@ function reconcile(docs){
    for(const o of group){
      if(resultByIndex.has(o._i))continue;
      const msg=unreadableLines.length
-       ? '⚠ LÍNEA/DESCRIPCIÓN ILEGIBLE – REVISAR O SOLICITAR FACTURA NUEVAMENTE. La aplicación no completó datos usando la OC.'
+       ? '⚠ UNO O MÁS CAMPOS DE LA LÍNEA SON DUDOSOS – REVISAR. Los demás datos legibles se conservaron y la aplicación no completó información usando la OC.'
        : 'La OC tiene factura, pero no se identificó una línea única y confiable para este artículo.';
      resultByIndex.set(o._i,{...o,match:{...inv,line:'',qty:null,price:null,amount:null},state:'Revisar',validation:msg});
    }
@@ -635,7 +637,7 @@ $('procesar').onclick=async()=>{
   const invoiceDocs=docs.filter(isInvoiceDoc);
   const ilegibles=invoiceDocs.filter(d=>criticalDocIssue(d));
   if(ilegibles.length){
-    $('processStatus').textContent=`⚠ ${ilegibles.length} factura(s) con datos críticos ilegibles. Solicita una copia nueva antes de digitarlas en Exactus.`;
+    $('processStatus').textContent=`⚠ ${ilegibles.length} factura(s) tienen uno o más campos dudosos. Se conservaron los datos legibles; revise únicamente los campos marcados.`;
   }
   state.parsedInvoices=invoiceDocs; renderInvoiceInventory();
   $('kFacturas').textContent=new Set(invoiceDocs.map(d=>d.invoice).filter(Boolean)).size;
@@ -713,23 +715,38 @@ $('control').onclick=()=>{
 function safeSheetName(s){return (String(s||'Sin bodega').replace(/[\\\/\?\*\[\]:]/g,' ').trim()||'Sin bodega').substring(0,31)}
 function uniqueSheetName(base,used){let n=safeSheetName(base),out=n,i=2;while(used.has(out)){out=safeSheetName(n.substring(0,27)+' '+i++);}used.add(out);return out}
 $('consumo').onclick=()=>{
- const eligible=state.matches.filter(x=>x.match && x.match.invoice && x.match.line && x.match.qty!=null);
- if(!eligible.length)return alert('No hay líneas facturadas para generar consumo.');
+ const received=x=>['RECIBIDA','RECIBIDO'].includes(norm(x.status));
+ const eligible=state.matches.filter(x=>
+   (x.match && x.match.invoice && x.match.line && x.match.qty!=null) || received(x)
+ );
+ if(!eligible.length)return alert('No hay líneas facturadas ni líneas marcadas como Recibida en el Excel para generar consumo.');
  const groups=new Map();
  for(const x of eligible){const k=x.warehouse||'Sin bodega';if(!groups.has(k))groups.set(k,[]);groups.get(k).push(x)}
  const wb=XLSX.utils.book_new(),used=new Set();
  for(const [warehouse,items] of groups){
    const rows=titleRows(`CONSUMO DE BODEGA · ${warehouse}`);rows.push([]);
-   rows.push(['Bodega','Código','Descripción','Cantidad consumida','Precio unitario','Monto consumo','Factura','Estado / observación']);
+   rows.push(['Bodega','Código','Descripción','Cantidad consumida','Precio unitario','Monto consumo','Factura','Fuente','Estado / observación']);
    let total=0;
-   for(const x of items){const m=x.match||{};const amount=(m.amount!=null&&m.amount!=='')?money(m.amount):((m.qty!=null&&m.price!=null)?money(m.qty)*money(m.price):'');if(amount!=='')total+=money(amount);rows.push([warehouse,x.article||m.code||'',m.line||x.desc||'',m.qty??'',m.price??'',amount,m.invoice||'',x.state==='Revisar'?x.validation||'Revisar':'']);}
+   for(const x of items){
+     const m=x.match||{};
+     const hasInvoice=!!(m.invoice && m.line && m.qty!=null);
+     const qty=hasInvoice?m.qty:x.qty;
+     const price=hasInvoice && m.price!=null?m.price:x.price;
+     const amount=hasInvoice && m.amount!=null && m.amount!=='' ? money(m.amount) :
+       ((qty!=null&&price!=null)?money(qty)*money(price):'');
+     if(amount!=='')total+=money(amount);
+     const desc=hasInvoice?(m.line||x.desc||''):(x.desc||x.article||'');
+     const source=hasInvoice?'Factura':'Excel · Estado Recibida';
+     const obs=hasInvoice?(x.state==='Revisar'?x.validation||'Revisar':''):'Recibida según control del Excel; consumo generado sin depender de lectura de factura.';
+     rows.push([warehouse,x.article||m.code||'',desc,qty??'',price??'',amount,hasInvoice?m.invoice||'':'',source,obs]);
+   }
    rows.push([]);rows.push(['TOTAL CONSUMO','','','','',total]);
    XLSX.utils.book_append_sheet(wb,professionalSheet(rows,'Consumo',5),uniqueSheetName(warehouse,used));
  }
  XLSX.writeFile(wb,`${$('empresa').value} - ${$('proyecto').value||'Proyecto'} - CONSUMO POR BODEGA.xlsx`);
 };
 $('pendientes').onclick=()=>{
- const pending=state.matches.filter(x=>x.state==='Sin correspondencia');
+ const pending=state.matches.filter(x=>x.state==='Sin correspondencia' && !['RECIBIDA','RECIBIDO'].includes(norm(x.status)));
  if(!pending.length)return alert('No hay artículos pendientes por recibir en esta conciliación.');
  const rows=titleRows('PENDIENTE POR RECIBIR / FACTURAR');rows.push([]);
  rows.push(['Empresa','Proyecto','Bodega','Proveedor','Número proveedor','Orden compra','Artículo','Descripción','Cantidad pedida','Precio unitario OC','Monto pendiente','Motivo']);
