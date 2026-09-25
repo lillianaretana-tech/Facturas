@@ -257,8 +257,10 @@ function aiToDoc(ai,file){
    raw:(ai.lines||[]).map(x=>`${x.code||""} ${x.description||""} ${x.quantity??""} ${x.unit_price??""} ${x.line_total??""}`).join("\n"),
    invoice:ai.invoice_number||"",oc:ai.purchase_order||"",date:ai.invoice_date||"",
    provider:ai.supplier_name||"",total:ai.total||0,type:ai.document_type||"unknown",
-   supplierLines:(ai.lines||[]).map(x=>({code:x.code,desc:x.description,qty:x.quantity,price:x.unit_price,amount:x.line_total,taxRate:x.tax_rate,taxAmount:x.tax_amount})),
-   aiWarnings:ai.warnings||[],subtotal:ai.subtotal,tax:ai.tax,currency:ai.currency
+   supplierLines:(ai.lines||[]).map(x=>({code:x.code,desc:x.description,qty:x.quantity,price:x.unit_price,amount:x.line_total,taxRate:x.tax_rate,taxAmount:x.tax_amount,verified:x.verified!==false,readability:x.readability||"clear",warning:x.warning||""})),
+   aiWarnings:ai.warnings||[],subtotal:ai.subtotal,tax:ai.tax,currency:ai.currency,
+   criticalVerified:ai.critical_fields_verified!==false,
+   criticalReadability:ai.critical_readability||"clear"
  };
 }
 function aiToDocs(result,file){
@@ -482,6 +484,13 @@ function isInvoiceDoc(d){
  const t=norm(d.type);
  return t==='INVOICE' || (!!d.invoice && t!=='PURCHASE ORDER' && t!=='SUPPORT');
 }
+function criticalDocIssue(d){
+ if(!isInvoiceDoc(d))return "";
+ const warned=(d.aiWarnings||[]).some(w=>norm(w).includes("DOCUMENTO ILEGIBLE"));
+ if(d.criticalVerified===false || d.criticalReadability==="uncertain" || d.criticalReadability==="illegible" || warned)
+   return "⚠ DOCUMENTO ILEGIBLE – SOLICITAR FACTURA NUEVAMENTE";
+ return "";
+}
 function sameOC(a,b){
  const clean=x=>norm(x).replace(/^OC\s*/,'').replace(/^0+/,'');
  return !!a && !!b && clean(a)===clean(b);
@@ -495,6 +504,7 @@ function closeNum(a,b,tol=.015){
  return Math.abs(a-b)/Math.max(1,Math.abs(b))<=tol;
 }
 function lineEvidence(o,l){
+ if(l.verified===false || l.readability==="uncertain" || l.readability==="illegible") return {score:-999,ds:0,qok:false,pok:false,codeok:false};
  const ds=Math.max(sim(o.desc,l.desc),sim(o.article,l.code),sim(o.article,l.desc));
  const qok=l.qty!=null && money(o.qty)>0 && closeNum(l.qty,o.qty,.001);
  const pok=l.price!=null && money(o.price)>0 && closeNum(l.price,o.price,.02);
@@ -520,6 +530,7 @@ function reconcile(docs){
    invs.sort((a,b)=>Number(providerSimilar(group[0].provider,b.provider))-Number(providerSimilar(group[0].provider,a.provider)));
    const inv=invs[0];
    const lines=(inv.supplierLines||[]).map((l,i)=>({...l,_li:i}));
+   const unreadableLines=lines.filter(l=>l.verified===false || l.readability==="uncertain" || l.readability==="illegible");
    const pairs=[];
    for(const o of group) for(const l of lines){const e=lineEvidence(o,l);pairs.push({o,l,...e})}
    pairs.sort((a,b)=>b.score-a.score);
@@ -539,7 +550,10 @@ function reconcile(docs){
    }
    for(const o of group){
      if(resultByIndex.has(o._i))continue;
-     resultByIndex.set(o._i,{...o,match:{...inv,line:'',qty:null,price:null,amount:null},state:'Revisar',validation:'La OC tiene factura, pero no se identificó una línea única y confiable para este artículo.'});
+     const msg=unreadableLines.length
+       ? '⚠ LÍNEA/DESCRIPCIÓN ILEGIBLE – REVISAR O SOLICITAR FACTURA NUEVAMENTE. La aplicación no completó datos usando la OC.'
+       : 'La OC tiene factura, pero no se identificó una línea única y confiable para este artículo.';
+     resultByIndex.set(o._i,{...o,match:{...inv,line:'',qty:null,price:null,amount:null},state:'Revisar',validation:msg});
    }
  }
  for(const o of orders)results.push(resultByIndex.get(o._i)||{...o,match:null,state:'Sin correspondencia',validation:'Sin evidencia suficiente.'});
@@ -619,6 +633,10 @@ $('procesar').onclick=async()=>{
     }
   }
   const invoiceDocs=docs.filter(isInvoiceDoc);
+  const ilegibles=invoiceDocs.filter(d=>criticalDocIssue(d));
+  if(ilegibles.length){
+    $('processStatus').textContent=`⚠ ${ilegibles.length} factura(s) con datos críticos ilegibles. Solicita una copia nueva antes de digitarlas en Exactus.`;
+  }
   state.parsedInvoices=invoiceDocs; renderInvoiceInventory();
   $('kFacturas').textContent=new Set(invoiceDocs.map(d=>d.invoice).filter(Boolean)).size;
   state.matches=reconcile(invoiceDocs); render();
@@ -686,7 +704,8 @@ $('control').onclick=()=>{
  for(const d of state.parsedInvoices){let k=d.file+'|'+d.invoice;if(seen.has(k))continue;seen.add(k);
    let related=state.matches.filter(x=>x.match && x.match.invoice===d.invoice);
    let st=!related.length?'Revisar':related.some(x=>x.state==='Revisar')?'Revisar':related.every(x=>x.state==='Conciliado')?'Conciliado':'Revisar';
-   rows.push([d.provider||'',d.oc||'',d.invoice||'',d.date||'',d.currency||'',d.subtotal??'',d.tax??'',d.total??'',(d.supplierLines||[]).length,[st,...(d.aiWarnings||[])].join(' · ')]);
+   const lineWarnings=(d.supplierLines||[]).filter(l=>l.verified===false||l.warning).map(l=>l.warning||'LÍNEA ILEGIBLE - REVISAR/SOLICITAR FACTURA NUEVAMENTE');
+   rows.push([d.provider||'',d.oc||'',d.invoice||'',d.date||'',d.currency||'',d.subtotal??'',d.tax??'',d.total??'',(d.supplierLines||[]).length,[st,...(d.aiWarnings||[]),...lineWarnings].filter(Boolean).join(' · ')]);
  }
  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,professionalSheet(rows,"Control",5),'Control facturas');
  XLSX.writeFile(wb,`${$('empresa').value} - ${$('proyecto').value||'Proyecto'} - CONTROL FACTURAS.xlsx`);
