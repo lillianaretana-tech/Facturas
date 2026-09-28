@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LillyTech | Conciliador de Pedidos y Facturas V5.4</title>
+<title>LillyTech | Conciliador de Pedidos y Facturas V5.5</title>
 <style>
 :root{--navy:#0b1f33;--blue:#173f67;--blue2:#235b91;--bg:#f3f6f9;--card:#fff;--line:#d8e0e8;--text:#17212b;--muted:#667788;--ok:#e9f7ef;--warn:#fff7df;--bad:#fdecec}
 *{box-sizing:border-box}body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}
@@ -561,6 +561,46 @@ function reconcile(docs){
  for(const o of orders)results.push(resultByIndex.get(o._i)||{...o,match:null,state:'Sin correspondencia',validation:'Sin evidencia suficiente.'});
  return results;
 }
+
+// Incremental reconciliation for an already-saved monthly period.
+// Previously resolved rows are preserved exactly as stored. Only unresolved rows
+// (Sin correspondencia / pending) are offered to the newly uploaded invoices.
+function isResolvedMatch(x){
+ return !!(x && x.match && x.match.invoice) && !['SIN CORRESPONDENCIA','PENDIENTE'].includes(norm(x.state));
+}
+function mergeInvoiceInventory(existing,newDocs){
+ const out=[...(existing||[])],seen=new Set(out.map(d=>[norm(d.invoice),norm(d.oc),norm(d.provider)].join('|')));
+ for(const d of (newDocs||[])){
+   const k=[norm(d.invoice),norm(d.oc),norm(d.provider)].join('|');
+   if(!seen.has(k)){out.push(d);seen.add(k)}
+ }
+ return out;
+}
+function reconcilePendingOnly(newDocs){
+ const previous=state.matches||[];
+ // If there is no prior reconciliation, use the normal full process.
+ if(!previous.length)return reconcile(newDocs);
+
+ const pendingIndexes=new Set(
+   previous.filter(x=>!isResolvedMatch(x)).map(x=>x._i)
+ );
+ if(!pendingIndexes.size)return previous;
+
+ // Reconcile new invoices normally, but only accept their result for rows that
+ // were unresolved before. This prevents old resolved rows from turning red
+ // just because their old invoices are not present in the new upload.
+ const fresh=reconcile(newDocs);
+ const freshByIndex=new Map(fresh.map(x=>[x._i,x]));
+ return previous.map(old=>{
+   if(!pendingIndexes.has(old._i))return old;
+   const n=freshByIndex.get(old._i);
+   if(!n)return old;
+   // A newly uploaded invoice may resolve or review the pending row.
+   // If it still has no correspondence, keep the previous pending record.
+   if(n.match && n.match.invoice)return n;
+   return old;
+ });
+}
 function renderInvoiceInventory(){
  const tb=$('invoiceTable').querySelector('tbody'); tb.innerHTML='';
  for(const d of state.parsedInvoices){
@@ -594,6 +634,12 @@ $('procesar').onclick=async()=>{
   // Modo consumo: permite trabajar únicamente con el Excel cuando no hay facturas.
   // Las líneas Recibida/Recibido se usan como fuente de recepción para Consumo por bodega.
   if(!state.invoiceDocs.length){
+    if((state.matches||[]).length){
+      $('processStatus').textContent='Período abierto sin facturas nuevas. Se conservaron todas las conciliaciones existentes.';
+      $('aiStatus').textContent='Sin cambios';
+      render(); renderInvoiceInventory();
+      return;
+    }
     state.parsedInvoices=[];
     state.matches=(state.rows||[]).map((o,i)=>({
       ...o,_i:i,match:null,
@@ -621,7 +667,10 @@ $('procesar').onclick=async()=>{
         // Segunda revisión dirigida: no altera lo ya leído. Solo busca facturas
         // correspondientes a OCs del pedido que no aparecieron en la primera pasada.
         if((f.type||"").includes("pdf")){
-          const faltantes=missingOrderOCs(docs);
+          const pendingOCs=(state.matches||[]).length
+            ? [...new Set(state.matches.filter(x=>!isResolvedMatch(x)).map(x=>x.oc).filter(Boolean))]
+            : [];
+          const faltantes=pendingOCs.length ? pendingOCs : missingOrderOCs(docs);
           if(faltantes.length){
             $('processStatus').textContent=`Verificación final de ${f.name}: buscando facturas omitidas...`;
             const audit=await analyzeWithAI(f,{
@@ -656,11 +705,17 @@ $('procesar').onclick=async()=>{
   if(ilegibles.length){
     $('processStatus').textContent=`⚠ ${ilegibles.length} factura(s) tienen uno o más campos dudosos. Se conservaron los datos legibles; revise únicamente los campos marcados.`;
   }
-  state.parsedInvoices=invoiceDocs; renderInvoiceInventory();
-  $('kFacturas').textContent=new Set(invoiceDocs.map(d=>d.invoice).filter(Boolean)).size;
-  state.matches=reconcile(invoiceDocs); render();
+  const hadPrevious=(state.matches||[]).length>0;
+  const previousResolved=(state.matches||[]).filter(isResolvedMatch).length;
+  state.parsedInvoices=mergeInvoiceInventory(state.parsedInvoices,invoiceDocs); renderInvoiceInventory();
+  $('kFacturas').textContent=new Set(state.parsedInvoices.map(d=>d.invoice).filter(Boolean)).size;
+  state.matches=hadPrevious ? reconcilePendingOnly(invoiceDocs) : reconcile(invoiceDocs); render();
+  const nowResolved=(state.matches||[]).filter(isResolvedMatch).length;
+  const newlyResolved=Math.max(0,nowResolved-previousResolved);
   try{await savePeriod('en_proceso')}catch(e){console.warn('No se pudo autoguardar',e)}
-  $('processStatus').textContent=`Proceso terminado. Revise las filas amarillas o rojas antes de exportar.`;
+  $('processStatus').textContent=hadPrevious
+    ? `Actualización terminada: se conservaron ${previousResolved} línea(s) ya resueltas y se conciliaron ${newlyResolved} pendiente(s) con las facturas nuevas.`
+    : `Proceso terminado. Revise las filas amarillas o rojas antes de exportar.`;
  }catch(e){console.error(e);$('processStatus').textContent='Error: '+e.message}
 };
 
@@ -774,7 +829,7 @@ $('pendientes').onclick=()=>{
  XLSX.writeFile(wb,`${$('empresa').value} - ${$('proyecto').value||'Proyecto'} - PENDIENTE POR RECIBIR.xlsx`);
 };
 
-function periodPayload(){return {version:"5.0",company:$("empresa").value,project:$("proyecto").value,period:$("mes").value,sourceFileName:state.sourceFileName||"",headers:state.headers||[],rows:state.rows||[],parsedInvoices:state.parsedInvoices||[],matches:state.matches||[]};}
+function periodPayload(){return {version:"5.5",company:$("empresa").value,project:$("proyecto").value,period:$("mes").value,sourceFileName:state.sourceFileName||"",headers:state.headers||[],rows:state.rows||[],parsedInvoices:state.parsedInvoices||[],matches:state.matches||[]};}
 function periodStatus(){return state.matches?.length&&state.parsedInvoices?.length?"en_proceso":"pedido_cargado";}
 async function savePeriod(forceStatus=null){
  const {data:{session}}=await sb.auth.getSession(); if(!session)return alert("Inicia sesión primero.");
